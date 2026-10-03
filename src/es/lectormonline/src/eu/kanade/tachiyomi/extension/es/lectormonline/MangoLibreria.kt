@@ -21,13 +21,17 @@ abstract class MangoLibreria : HttpSource() {
     override fun headersBuilder() = super.headersBuilder()
         .add("Referer", "$baseUrl/")
 
-    override val client = network.client.newBuilder()
+    override val client = network.cloudflareClient.newBuilder()
         .addInterceptor { chain ->
             val request = chain.request()
-            // The image CDN rejects requests with the main site's Referer header.
+            // The image CDN rejects the main site's Referer and non-browser image requests.
             if (request.url.host != baseUrl.toHttpUrl().host) {
                 val newRequest = request.newBuilder()
                     .removeHeader("Referer")
+                    .header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                    .header("Sec-Fetch-Dest", "image")
+                    .header("Sec-Fetch-Mode", "no-cors")
+                    .header("Sec-Fetch-Site", "cross-site")
                     .build()
                 chain.proceed(newRequest)
             } else {
@@ -65,16 +69,6 @@ abstract class MangoLibreria : HttpSource() {
                     thumbnail_url = img?.let { it.absUrl("src").ifBlank { it.absUrl("data-src") } }
                 }
             }
-
-        if (mangas.isEmpty()) {
-            // Temporary diagnostic: shows what the site really returned.
-            throw Exception(
-                "Sin resultados. code=${response.code}, title=${document.title()}, " +
-                    "articles=${document.select("article").size}, " +
-                    "links=${document.select("a[href*='/comics/']").size}, " +
-                    "texto=${document.body().text().take(120)}",
-            )
-        }
 
         val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
         val hasNextPage = document.selectFirst("a[href*='page=${currentPage + 1}']") != null
@@ -133,7 +127,7 @@ abstract class MangoLibreria : HttpSource() {
             .filter { it.attr("href").startsWith(mangaPath) }
             // Skip the "Comenzar lectura" button, which repeats the first chapter.
             .filterNot { it.text().contains("lectura", ignoreCase = true) }
-            .distinctBy { it.attr("href") }
+            .distinctBy { it.attr("href").substringAfter("/chapters/").substringBefore("?").trimEnd('/') }
             .map { link ->
                 SChapter.create().apply {
                     setUrlWithoutDomain(link.absUrl("href"))
