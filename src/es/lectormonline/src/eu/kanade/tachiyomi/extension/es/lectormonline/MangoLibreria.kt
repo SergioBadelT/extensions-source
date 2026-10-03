@@ -136,6 +136,8 @@ abstract class MangoLibreria : HttpSource() {
                     chapter_number = chapterNumberRegex.find(name)?.value?.toFloatOrNull() ?: -1f
                 }
             }
+            // The site lists some chapters twice under different links; keep the first of each name.
+            .distinctBy { chapter -> chapter.name.trim().lowercase().ifBlank { chapter.url } }
             .sortedByDescending { it.chapter_number }
     }
 
