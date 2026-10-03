@@ -5,14 +5,14 @@ plugins {
 }
 
 keiyoushi {
-    name = "MangoLibreria"
+    name = "GatoLibreria"
     versionCode = 2
     contentWarning = ContentWarning.MIXED
     libVersion = "1.4"
 
     source {
         lang = "es"
-        baseUrl = "https://mangolibreria.com"
+        baseUrl = "https://gatolibreria.com"
         versionId = 2
     }
 }
