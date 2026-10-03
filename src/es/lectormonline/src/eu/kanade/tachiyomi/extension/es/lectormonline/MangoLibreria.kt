@@ -12,6 +12,8 @@ import keiyoushi.annotation.Source
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.nodes.Document
+import java.time.Instant
 
 @Source
 abstract class MangoLibreria : HttpSource() {
@@ -41,6 +43,12 @@ abstract class MangoLibreria : HttpSource() {
         .build()
 
     private val chapterNumberRegex = Regex("""\d+(?:\.\d+)?""")
+
+    // The page embeds its data as a JS object: one block per translation group.
+    private val scanGroupRegex = Regex("""scanGroup:\{[^}]*?name:"([^"]*)"[^}]*\},chapters:\[""")
+    private val chapterDataRegex = Regex(
+        """\{id:(\d+),[^{}]*?chapterNumber:([\d.]+),[^{}]*?releaseDate:"([^"]*)",[^{}]*?chapterPath:"([^"]+)"""",
+    )
 
     // ============================== Popular ==============================
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/comics?sort=views&page=$page", headers)
@@ -123,6 +131,43 @@ abstract class MangoLibreria : HttpSource() {
         val document = response.asJsoup()
         val mangaPath = response.request.url.encodedPath
 
+        val fromData = parseChaptersFromData(document, mangaPath)
+        if (fromData.isNotEmpty()) {
+            return fromData.sortedByDescending { it.chapter_number }
+        }
+
+        return parseChaptersFromLinks(document, mangaPath)
+    }
+
+    // Reads every chapter, with its translation group and release date, from the page data.
+    private fun parseChaptersFromData(document: Document, mangaPath: String): List<SChapter> {
+        val data = document.select("script").joinToString("\n") { it.data() }
+        val groups = scanGroupRegex.findAll(data).toList()
+
+        return groups.flatMapIndexed { index, group ->
+            val groupName = group.groupValues[1]
+            val segmentEnd = groups.getOrNull(index + 1)?.range?.first ?: data.length
+            val segment = data.substring(group.range.last + 1, segmentEnd)
+
+            chapterDataRegex.findAll(segment).mapNotNull { match ->
+                val number = match.groupValues[2]
+                val path = match.groupValues[4]
+                if (!path.startsWith(mangaPath)) return@mapNotNull null
+
+                SChapter.create().apply {
+                    url = path
+                    name = "Capítulo $number"
+                    chapter_number = number.toFloatOrNull() ?: -1f
+                    date_upload = runCatching { Instant.parse(match.groupValues[3]).toEpochMilli() }
+                        .getOrDefault(0L)
+                    scanlator = groupName
+                }
+            }.toList()
+        }.distinctBy { it.url }
+    }
+
+    // Fallback if the page data changes: read the chapter links, one version per chapter.
+    private fun parseChaptersFromLinks(document: Document, mangaPath: String): List<SChapter> {
         return document.select("a[href*='/chapters/']")
             .filter { it.attr("href").startsWith(mangaPath) }
             // Skip the "Comenzar lectura" button, which repeats the first chapter.
@@ -136,8 +181,15 @@ abstract class MangoLibreria : HttpSource() {
                     chapter_number = chapterNumberRegex.find(name)?.value?.toFloatOrNull() ?: -1f
                 }
             }
-            // The site lists some chapters twice under different links; keep the first of each name.
-            .distinctBy { chapter -> chapter.name.trim().lowercase().ifBlank { chapter.url } }
+            .groupBy { chapter ->
+                if (chapter.chapter_number >= 0f) {
+                    "n${chapter.chapter_number}"
+                } else {
+                    chapter.name.trim().lowercase().ifBlank { chapter.url }
+                }
+            }
+            .values
+            .map { group -> group.maxBy { it.url.substringAfterLast("/").toLongOrNull() ?: 0L } }
             .sortedByDescending { it.chapter_number }
     }
 
