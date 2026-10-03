@@ -7,16 +7,11 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
-import keiyoushi.utils.extractNextJs
-import keiyoushi.utils.tryParse
-import kotlinx.serialization.json.JsonObject
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
-import java.text.SimpleDateFormat
-import java.util.Locale
-import java.util.TimeZone
 
 @Source
 abstract class MangoLibreria : HttpSource() {
@@ -41,40 +36,31 @@ abstract class MangoLibreria : HttpSource() {
         }
         .build()
 
-    private val dateFormat1 by lazy {
-        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.ROOT).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-    }
-
-    private val dateFormat2 by lazy {
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSSSS", Locale.ROOT).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }
-    }
-
-    private val dateFormat3 by lazy {
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
-    }
-
-    private fun parseDate(dateStr: String?): Long = dateFormat1.tryParse(dateStr)
-        .takeIf { it != 0L }
-        ?: dateFormat2.tryParse(dateStr)
-            .takeIf { it != 0L }
-        ?: dateFormat3.tryParse(dateStr)
+    private val chapterNumberRegex = Regex("""\d+(?:\.\d+)?""")
 
     // ============================== Popular ==============================
     override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/comics?sort=views&page=$page", headers)
 
     override fun popularMangaParse(response: Response): MangasPage {
-        val props = response.extractNextJs<ComicsDataProps> {
-            it is JsonObject && "comicsData" in it
-        }
-        val comics = props!!.comicsData.comics
-        return MangasPage(
-            comics.map { it.toSManga() },
-            props.comicsData.page < props.comicsData.totalPages,
-        )
+        val document = response.asJsoup()
+
+        val mangas = document.select("article").mapNotNull { article ->
+            val link = article.selectFirst("a[href^='/comics/']:not([href*='/chapters/'])")
+                ?: return@mapNotNull null
+
+            SManga.create().apply {
+                setUrlWithoutDomain(link.absUrl("href"))
+                title = link.attr("title").ifBlank {
+                    article.selectFirst("h3")?.text().orEmpty()
+                }
+                thumbnail_url = article.selectFirst("img")?.absUrl("src")
+            }
+        }.distinctBy { it.url }
+
+        val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
+        val hasNextPage = document.selectFirst("a[href*='page=${currentPage + 1}']") != null
+
+        return MangasPage(mangas, hasNextPage)
     }
 
     // ============================== Latest ===============================
@@ -100,38 +86,55 @@ abstract class MangoLibreria : HttpSource() {
 
     // ============================== Details ==============================
     override fun mangaDetailsParse(response: Response): SManga {
-        val props = response.extractNextJs<ComicDataProps> {
-            it is JsonObject && "comicData" in it
+        val document = response.asJsoup()
+
+        return SManga.create().apply {
+            title = document.selectFirst("h1")?.text()
+                ?: document.selectFirst("meta[property=og:title]")?.attr("content")
+                    ?.substringBefore(" |")
+                    .orEmpty()
+            description = document.selectFirst("meta[property=og:description]")?.attr("content")
+            thumbnail_url = document.selectFirst("meta[property=og:image]")?.attr("content")
+
+            val labels = document.select("span").map { it.text().trim() }
+            status = when {
+                labels.any { it.equals("En emisión", ignoreCase = true) } -> SManga.ONGOING
+                labels.any { it.equals("Finalizado", ignoreCase = true) } -> SManga.COMPLETED
+                else -> SManga.UNKNOWN
+            }
         }
-        return props!!.comicData.toSManga()
     }
 
     // ============================= Chapters ==============================
     override fun chapterListParse(response: Response): List<SChapter> {
-        val props = response.extractNextJs<ComicDataProps> {
-            it is JsonObject && "comicData" in it
-        }
+        val document = response.asJsoup()
+        val mangaPath = response.request.url.encodedPath
 
-        val chapters = props!!.comicData.scanGroups?.flatMap { group ->
-            val groupName = group.name
-            group.chapters.map { ch ->
-                ch.toSChapter(groupName).apply {
-                    date_upload = parseDate(ch.dateString)
+        return document.select("a[href*='/chapters/']")
+            .filter { it.attr("href").startsWith(mangaPath) }
+            // Skip the "Comenzar lectura" button, which repeats the first chapter.
+            .filterNot { it.text().contains("lectura", ignoreCase = true) }
+            .distinctBy { it.attr("href") }
+            .map { link ->
+                SChapter.create().apply {
+                    setUrlWithoutDomain(link.absUrl("href"))
+                    name = link.attr("title").substringBefore("·").trim()
+                        .ifBlank { link.text().trim() }
+                    chapter_number = chapterNumberRegex.find(name)?.value?.toFloatOrNull() ?: -1f
                 }
             }
-        } ?: emptyList()
-
-        return chapters.sortedByDescending { it.chapter_number }
+            .sortedByDescending { it.chapter_number }
     }
 
     // =============================== Pages ===============================
     override fun pageListParse(response: Response): List<Page> {
-        val props = response.extractNextJs<ComicDataProps> {
-            it is JsonObject && "comicData" in it
-        }
-        return props!!.comicData.urlPages?.mapIndexed { index, url ->
-            Page(index, imageUrl = url)
-        } ?: emptyList()
+        val document = response.asJsoup()
+
+        return document.select("#reader-top .reader-page-slot img")
+            .filter { it.hasAttr("src") }
+            .mapIndexed { index, img ->
+                Page(index, imageUrl = img.absUrl("src"))
+            }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
