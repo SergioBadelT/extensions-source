@@ -167,31 +167,29 @@ abstract class MangoLibreria : HttpSource() {
     }
 
     // Fallback if the page data changes: read the chapter links, one version per chapter.
-    private fun parseChaptersFromLinks(document: Document, mangaPath: String): List<SChapter> {
-        return document.select("a[href*='/chapters/']")
-            .filter { it.attr("href").startsWith(mangaPath) }
-            // Skip the "Comenzar lectura" button, which repeats the first chapter.
-            .filterNot { it.text().contains("lectura", ignoreCase = true) }
-            .distinctBy { it.attr("href").substringAfter("/chapters/").substringBefore("?").trimEnd('/') }
-            .map { link ->
-                SChapter.create().apply {
-                    setUrlWithoutDomain(link.absUrl("href"))
-                    name = link.attr("title").substringBefore("·").trim()
-                        .ifBlank { link.text().trim() }
-                    chapter_number = chapterNumberRegex.find(name)?.value?.toFloatOrNull() ?: -1f
-                }
+    private fun parseChaptersFromLinks(document: Document, mangaPath: String): List<SChapter> = document.select("a[href*='/chapters/']")
+        .filter { it.attr("href").startsWith(mangaPath) }
+        // Skip the "Comenzar lectura" button, which repeats the first chapter.
+        .filterNot { it.text().contains("lectura", ignoreCase = true) }
+        .distinctBy { it.attr("href").substringAfter("/chapters/").substringBefore("?").trimEnd('/') }
+        .map { link ->
+            SChapter.create().apply {
+                setUrlWithoutDomain(link.absUrl("href"))
+                name = link.attr("title").substringBefore("·").trim()
+                    .ifBlank { link.text().trim() }
+                chapter_number = chapterNumberRegex.find(name)?.value?.toFloatOrNull() ?: -1f
             }
-            .groupBy { chapter ->
-                if (chapter.chapter_number >= 0f) {
-                    "n${chapter.chapter_number}"
-                } else {
-                    chapter.name.trim().lowercase().ifBlank { chapter.url }
-                }
+        }
+        .groupBy { chapter ->
+            if (chapter.chapter_number >= 0f) {
+                "n${chapter.chapter_number}"
+            } else {
+                chapter.name.trim().lowercase().ifBlank { chapter.url }
             }
-            .values
-            .map { group -> group.maxBy { it.url.substringAfterLast("/").toLongOrNull() ?: 0L } }
-            .sortedByDescending { it.chapter_number }
-    }
+        }
+        .values
+        .map { group -> group.maxBy { it.url.substringAfterLast("/").toLongOrNull() ?: 0L } }
+        .sortedByDescending { it.chapter_number }
 
     // =============================== Pages ===============================
     override fun pageListParse(response: Response): List<Page> {
