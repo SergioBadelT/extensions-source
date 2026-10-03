@@ -44,18 +44,37 @@ abstract class MangoLibreria : HttpSource() {
     override fun popularMangaParse(response: Response): MangasPage {
         val document = response.asJsoup()
 
-        val mangas = document.select("article").mapNotNull { article ->
-            val link = article.selectFirst("a[href^='/comics/']:not([href*='/chapters/'])")
-                ?: return@mapNotNull null
-
-            SManga.create().apply {
-                setUrlWithoutDomain(link.absUrl("href"))
-                title = link.attr("title").ifBlank {
-                    article.selectFirst("h3")?.text().orEmpty()
-                }
-                thumbnail_url = article.selectFirst("img")?.absUrl("src")
+        val mangas = document.select("a[href*='/comics/']:not([href*='/chapters/'])")
+            .filter { link ->
+                val slug = link.attr("href").substringBefore("?").trimEnd('/').substringAfter("/comics/")
+                slug.isNotEmpty() && '/' !in slug
             }
-        }.distinctBy { it.url }
+            .distinctBy { it.attr("href").substringBefore("?").trimEnd('/') }
+            .mapNotNull { link ->
+                val container = link.parents().firstOrNull { it.tagName() == "article" } ?: link.parent()
+                val img = link.selectFirst("img") ?: container?.selectFirst("img")
+                val name = link.attr("title")
+                    .ifBlank { container?.selectFirst("h3")?.text().orEmpty() }
+                    .ifBlank { img?.attr("alt").orEmpty() }
+                    .ifBlank { link.text() }
+                if (name.isBlank()) return@mapNotNull null
+
+                SManga.create().apply {
+                    setUrlWithoutDomain(link.absUrl("href"))
+                    title = name.trim()
+                    thumbnail_url = img?.let { it.absUrl("src").ifBlank { it.absUrl("data-src") } }
+                }
+            }
+
+        if (mangas.isEmpty()) {
+            // Temporary diagnostic: shows what the site really returned.
+            throw Exception(
+                "Sin resultados. code=${response.code}, title=${document.title()}, " +
+                    "articles=${document.select("article").size}, " +
+                    "links=${document.select("a[href*='/comics/']").size}, " +
+                    "texto=${document.body().text().take(120)}",
+            )
+        }
 
         val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
         val hasNextPage = document.selectFirst("a[href*='page=${currentPage + 1}']") != null
